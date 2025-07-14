@@ -1,0 +1,265 @@
+<!--
+MIT License
+
+Copyright (c) 2025 flvinny
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+-->
+<!DOCTYPE html>
+
+<head>
+</head>
+
+<body>
+    <div>
+        <label for="driveselect">Build list for:</label>
+        <select id="driveselect">
+            <option value="neutrinoHDD">PS2 Internal HDD</option>
+            <option value="neutrinoMX4">MX4SIO</option>
+            <option value="neutrinoMMCE">MMCE</option>
+            <option value="neutrinoUSB">USB Drive</option>
+            <option value="neutrinoILINK">iLink</option>
+        </select>
+    </div>
+    <div>
+        <label for="gameinput">Select the drive containing the CD and DVD folders:</label>
+        <button id="gameinput">Choose Directory</button>
+    </div>
+    <div>
+        <label for="xebinput">Select the drive containing the XEBPLUS folder:</label>
+        <button id="xebinput">Choose Directory</button>
+    </div>
+    <div>
+        <pre id="newlist"></pre>
+        <div>
+            <button id="syncbutton" disabled>―Sync―></button>
+        </div>
+        <pre id="currentlist"></pre>
+    </div>
+</body>
+<style>
+    body>* {
+        margin: 0.1rem;
+        font-family: Verdana;
+        font-size: small;
+    }
+
+    :nth-last-child(1 of div)>div {
+        display: flex;
+        justify-content: center;
+    }
+
+    pre {
+        border: solid 1px;
+    }
+</style>
+<script>
+    let listFileHandle;
+
+    const driveSelectEl = document.getElementById("driveselect");
+    const gameInputEl = document.getElementById("gameinput");
+    const xebInputEl = document.getElementById("xebinput");
+    const newListEl = document.getElementById("newlist");
+    const currentListEl = document.getElementById("currentlist");
+    const syncButtonEl = document.getElementById("syncbutton");
+
+    const cnfGamecodePattern = /^\s*BOOT2\s*=\s*cdrom0:\\([a-zA-Z0-9_.]{11});1\s*$/m;
+    const blobToDataView = async blob => new DataView(await blob.arrayBuffer());
+
+    const scanDirectoryForISOs = async (dirHandle, dirName) => {
+        let isoFiles;
+
+        try {
+            isoFiles = (await Array.fromAsync(
+                (await dirHandle.getDirectoryHandle(dirName)).entries()
+            ))
+                .map(array => array.with(0, `/${dirName}/${array[0]}`))
+                .filter(([filepath]) => filepath.endsWith(".iso"));
+        } catch (e) {
+            console.warn(`Directory ${dirName} not found!`);
+            isoFiles = [];
+        };
+
+        return isoFiles;
+    };
+
+    const searchForGameISOsAndGenerateList = async (dirHandle) => {
+        const cdDir = await scanDirectoryForISOs(dirHandle, 'CD');
+        const dvdDir = await scanDirectoryForISOs(dirHandle, 'DVD');
+        const allIsos = [...cdDir, ...dvdDir];
+
+        newListEl.innerText = "";
+
+        if (allIsos.length === 0) {
+            alert("No games found! Make sure your .iso files are placed inside either the CD or DVD directories.")
+            throw new Error("No games were found in the CD and DVD directories.");
+        };
+
+        // TODO: Implement VMC creation.
+        for await (const [filepath, fileSystemFileHandle] of allIsos) {
+            const gamecode = await getGameCodeFromIso(await fileSystemFileHandle.getFile());
+            newListEl.innerText += `${gamecode} ${filepath} 0000000000000000000000\n`;
+        };
+
+        // Generates a SHA-1 hash.
+        // The reference implementation provided with neutrino launcher uses 
+        // a MD5 hash instead, but using a different hashing algorithm should be 
+        // inconsequential as it's only used for invalidating the artwork cache
+        newListEl.innerText += await getSHA256Hash((new TextEncoder()).encode(newListEl.innerText));
+
+        refreshSyncButtonState();
+    };
+
+    const loadXEBPLUSDirectory = async (dirHandle) => {
+        const listFilename = driveSelectEl.value + ".list";
+        let xebCfgNeutrinoDir
+
+        try {
+            xebCfgNeutrinoDir = (await (await (await dirHandle
+                .getDirectoryHandle("XEBPLUS"))
+                .getDirectoryHandle("CFG"))
+                .getDirectoryHandle("neutrinoLauncher"));
+        } catch (e) {
+            alert("Directory XEBPLUS/CFG/neutrinoLauncher does not exist on selected drive!")
+            throw e;
+        };
+
+        try {
+            listFileHandle = await xebCfgNeutrinoDir.getFileHandle(listFilename);
+        } catch (e) {
+            // TODO: I would much rather have this as a confirmation dialog,
+            // but it's simply not possible with the browser native alert
+            //
+            // `File ${listFilename} does not exist! Create file?`
+            // 'Yes', 'No'
+            alert(`File ${listFilename} does not exist! It will be created.`);
+            listFileHandle = await xebCfgNeutrinoDir.getFileHandle(listFilename, { create: true });
+        };
+
+        currentListEl.innerText = (await (await listFileHandle.getFile()).text()) || "\n";
+        refreshSyncButtonState();
+    };
+
+    const getGameCodeFromIso = async isoFile => {
+        // Sorry about the lack of comments, I tried to give the variables meaningful
+        // names. These are the ISO-9660 filesystem docs I used for reference
+        // https://wiki.osdev.org/ISO_9660
+
+        // TODO: validate this is not just any iso file, but a proper PS2 ISO file
+        // look up how rom-properties does it
+
+        // TODO: would it be better to just use the LE+BE values as intended instead of forcibly interpreting them as little endian?
+        // untested but this should be it:
+        // const lbaSizeArrayBuffer = await primaryVolumeDescriptor.slice(128, 128 + 4).arrayBuffer();
+        // const lbaSize = (new DataView(lbaSizeArrayBuffer)).getInt16();  // 2048 on most (if not all) ISOs
+        // don't know about "better", but I feel the code would be more understandable this way
+
+        if (isoFile instanceof File) {
+            const primaryVolumeDescriptor = isoFile.slice(0x8000, 0x8000 + 2048);
+            const lbaSizeArrayBuffer = primaryVolumeDescriptor.slice(128, 128 + 2);  // actual length is 4, but since its the same value twice (little endian then big endian) we can just use the little endian version
+            const lbaSize = (await blobToDataView(lbaSizeArrayBuffer)).getInt16(0, true);  // 2048 on most (if not all) ISOs
+            const rootDirEntry = primaryVolumeDescriptor.slice(156, 156 + 34);
+            const rootDirDataLbaNo = rootDirEntry.slice(2, 2 + 4);  // actual size is 8, more LE+BE shenenigans
+            const rootDirDataOffset = (await blobToDataView(rootDirDataLbaNo)).getUint32(0, true) * lbaSize;
+            const rootDirDataSize = (await blobToDataView(rootDirEntry.slice(10, 10 + 4))).getUint32(0, true);  // ditto as above
+
+            const rootDirData = isoFile.slice(rootDirDataOffset, rootDirDataOffset + rootDirDataSize);
+
+            let rootDirRecordIndex = 0;
+
+            while (rootDirRecordIndex < rootDirDataSize) {
+                const filenameLength = (await blobToDataView(rootDirData.slice(rootDirRecordIndex + 32, rootDirRecordIndex + 33))).getUint8();
+                const filename = await (rootDirData.slice(rootDirRecordIndex + 33, rootDirRecordIndex + 33 + filenameLength)).text();
+
+                if (filename === "SYSTEM.CNF;1") break;
+
+                rootDirRecordIndex = rootDirRecordIndex + (await blobToDataView(rootDirData.slice(rootDirRecordIndex, rootDirRecordIndex + 1))).getUint8() + (await blobToDataView(rootDirData.slice(rootDirRecordIndex + 1, rootDirRecordIndex + 2))).getUint8();
+            };
+
+            const systemCnfDataLbaNo = rootDirData.slice(rootDirRecordIndex + 2, rootDirRecordIndex + 2 + 4);  // ditto
+            const systemCnfDataOffset = (await blobToDataView(systemCnfDataLbaNo)).getUint32(0, true) * lbaSize;
+            const systemCnfDataSize = (await blobToDataView(rootDirData.slice(rootDirRecordIndex + 10, rootDirRecordIndex + 10 + 4))).getUint32(0, true);  // ditto
+
+            const systemCnfText = await isoFile.slice(systemCnfDataOffset, systemCnfDataOffset + systemCnfDataSize).text();
+
+            return systemCnfText.match(cnfGamecodePattern)[1];
+        };
+    };
+
+    const getSHA256Hash = async arrayBuffer => {
+        // https://developer.mozilla.org/en-US/docs/Web/API/Web_Crypto_API/Non-cryptographic_uses_of_subtle_crypto#hashing_a_file
+        const hashAsArrayBuffer = await crypto.subtle.digest("SHA-256", arrayBuffer);
+
+        const uint8ViewOfHash = new Uint8Array(hashAsArrayBuffer);
+
+        const hashAsString = Array.from(uint8ViewOfHash)
+            .map((b) => b.toString(16).padStart(2, "0"))
+            .join("");
+
+        return hashAsString;
+    };
+
+    const refreshSyncButtonState = () => {
+        // Enable sync button only if
+        // 1. Drive containing games has been selected by user
+        // 2. XEBPLUS directory handle was succesfully loaded
+        if (newListEl.innerText && listFileHandle) syncButtonEl.disabled = false;
+        else syncButtonEl.disabled = true;
+    };
+
+    const gameInputHandleClick = async () => {
+        const dirHandle = await window.showDirectoryPicker();
+
+        searchForGameISOsAndGenerateList(dirHandle);
+        if (driveSelectEl.value === 'neutrinoUSB') {
+            loadXEBPLUSDirectory(dirHandle);
+        };
+    };
+
+    const xebInputHandleClick = async () => {
+        const dirHandle = await window.showDirectoryPicker();
+        loadXEBPLUSDirectory(dirHandle);
+    };
+
+    const syncButtonHandleClick = async () => {
+        const listContents = newListEl.innerText;
+        const writeableFile = await listFileHandle.createWritable();
+        await writeableFile.write(listContents);
+        await writeableFile.close();
+        currentListEl.innerText = listContents;
+        alert("List file written to succesfully!");
+    };
+
+    const driveSelectHandleChange = e => {
+        // Clear list handler and both list fields
+        listFileHandle = undefined;
+        newListEl.innerText = "";
+        currentListEl.innerText = "";
+
+        if (e.target.value === 'neutrinoUSB') xebInputEl.disabled = true;
+        else xebInputEl.disabled = false;
+        refreshSyncButtonState();
+    };
+
+    gameInputEl.addEventListener('click', gameInputHandleClick);
+    xebInputEl.addEventListener('click', xebInputHandleClick);
+    syncButtonEl.addEventListener('click', syncButtonHandleClick);
+    driveSelectEl.addEventListener('change', driveSelectHandleChange);
+
+</script>
