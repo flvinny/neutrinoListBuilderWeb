@@ -60,13 +60,41 @@ SOFTWARE.
         font-size: small;
     }
 
-    :nth-last-child(1 of div)>div {
-        display: flex;
-        justify-content: center;
+    :nth-last-child(1 of div) {
+        >pre {
+            min-height: 1em;
+            max-height: 30vh;
+            margin: 10px;
+            overflow: auto;
+        }
+
+        >div {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+
+            >button {
+                max-height: 2em;
+            }
+        }
     }
 
     pre {
         border: solid 1px;
+    }
+
+    @media (min-width: 960px) {
+        :nth-last-child(1 of div) {
+            display: flex;
+
+            >pre {
+                width: 40vw;
+            }
+
+            >div {
+                width: 20vw;
+            }
+        }
     }
 </style>
 <script>
