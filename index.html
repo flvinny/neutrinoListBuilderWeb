@@ -280,8 +280,15 @@ SOFTWARE.
         newListEl.innerText = "";
         currentListEl.innerText = "";
 
-        if (e.target.value === 'neutrinoUSB') xebInputEl.disabled = true;
-        else xebInputEl.disabled = false;
+        if (e.target.value === 'neutrinoUSB') {
+            // Disable xebInput button, since it and XEB+
+            // will share a drive
+            xebInputEl.disabled = true;
+            xebInputEl.innerText = "Same as CD/DVD";
+        } else {
+            xebInputEl.disabled = false;
+            xebInputEl.innerText = "Choose Directory";
+        };
         refreshSyncButtonState();
     };
 
